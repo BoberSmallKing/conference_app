@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Конференция {{ conference_id }}</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        const conferenceId = "{{ conference_id }}";
+        const username = prompt("Введите свое имя пользователя:");
+        const localStream = new MediaStream();
+        let peers = {};
+        let isMuted = false;
+        let audioContext;
+        let gainNode;
+
+        socket.emit('join', { conference_id: conferenceId, username: username });
+
+        socket.on('user_joined', (data) => {
+            const message = `${data.username} joined the conference.`;
+            document.getElementById("messages").innerHTML += `<li>${message}</li>`;
+            updateUserList(data.users);
+            if (data.users.length > 1) {
+                startPeerConnection(data.users[data.users.length - 1]);
+            }
+        });
+
+        socket.on('receive_message', (data) => {
+            const message = `${data.username}: ${data.message}`;
+            document.getElementById("messages").innerHTML += `<li>${message}</li>`;
+        });
+
+        socket.on('offer', async (data) => {
+            const peerConnection = new RTCPeerConnection();
+            peers[data.from] = peerConnection;
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            socket.emit('answer', { answer, to: data.from });
+        });
+
+        socket.on('answer', (data) => {
+            peers[data.from].setRemoteDescription(new RTCSessionDescription(data.answer));
+        });
+
+        socket.on('ice_candidate', (data) => {
+            peers[data.from].addIceCandidate(new RTCIceCandidate(data.candidate));
+        });
+
+        async function startPeerConnection(user) {
+            const peerConnection = new RTCPeerConnection();
+            peers[user] = peerConnection;
+
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('ice_candidate', { candidate: event.candidate, to: user });
+                }
+            };
+
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            socket.emit('offer', { offer, to: user });
+        }
+
+        async function initLocalStream() {
+            const audioConstraints = {
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                    sampleRate: 48000,
+                    channelCount: 2
+                }
+            };
+        
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+                localStream.addTrack(stream.getAudioTracks()[0]);
+        
+                // Create an audio context and gain node to adjust volume
+                audioContext = new AudioContext();
+                gainNode = audioContext.createGain();
+                const source = audioContext.createMediaStreamSource(stream);
+                source.connect(gainNode).connect(audioContext.destination);
+        
+                // Automatically play the audio
+                const audioElement = document.createElement('audio');
+                audioElement.srcObject = localStream;
+                audioElement.play();
+            } catch (error) {
+                console.error('Error accessing media devices.', error);
+            }
+        }
+        
+        // Function to adjust volume level (e.g., range input can be added to control this)
+        function setVolume(level) {
+            if (gainNode) {
+                gainNode.gain.value = level;  // Range from 0.0 (mute) to 1.0 (full volume)
+            }
+        }
+
+        function toggleMute() {
+            const audioTrack = localStream.getAudioTracks()[0];
+            if (audioTrack) {
+                isMuted = !isMuted;
+                audioTrack.enabled = !isMuted;
+                document.getElementById('muteButton').textContent = isMuted ? 'Unmute' : 'Mute';
+            }
+        }
+
+        function updateUserList(users) {
+            const userList = document.getElementById("userList");
+            userList.innerHTML = '';
+            users.forEach(user => {
+                userList.innerHTML += `<li>${user}</li>`;
+            });
+        }
+        const peerConnectionConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },  // Public STUN server
+                { urls: 'turn:your-turn-server.com', username: 'user', credential: 'pass' }  // TURN server for relaying
+            ]
+        };
+        
+        const peerConnection = new RTCPeerConnection(peerConnectionConfig);
+
+        window.onload = initLocalStream;
+    </script>
+</head>
+<body>
+    <h1>Конференция {{ conference_id }}</h1>
+    <ul id="userList"></ul>
+    <ul id="messages"></ul>
+    <input id="messageInput" type="text" placeholder="Введите сообщение..." />
+    <button onclick="sendMessage()">Отправить</button>
+    <button id="muteButton" onclick="toggleMute()">Mute</button>
+</body>
+</html>
